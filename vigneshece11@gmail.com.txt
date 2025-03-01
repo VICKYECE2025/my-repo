@@ -1,0 +1,325 @@
+1. GitHub Actions Workflow: build.yaml
+This file builds and pushes the Docker image to ECR.
+
+.github/workflows/build.yaml
+yaml
+Copy
+name: Build and Push Docker Image to ECR
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v2
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v2
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v1
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: us-east-1
+
+    - name: Log in to Amazon ECR
+      run: |
+        aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin 183114607892.dkr.ecr.us-west-2.amazonaws.com
+
+    - name: Build, Tag & Push Docker Image for Hello World Service
+      run: |
+        docker build -t helloworld-service .
+        docker tag helloworld-service:latest 183114607892.dkr.ecr.us-west-2.amazonaws.com/my-app-repo:latest
+        docker push 183114607892.dkr.ecr.us-west-2.amazonaws.com/my-app-repo:latest
+
+    - name: Cleanup local Docker images
+      run: docker system prune -f
+2. GitHub Actions Workflow: infra.yaml
+This file deploys the infrastructure using Terraform.
+
+.github/workflows/infra.yaml
+yaml
+Copy
+name: Infra Provisioning through Terraform
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Environment to deploy (dev, staging, prod)"
+        required: true
+        default: "dev"
+        type: choice
+        options:
+        - dev
+        - staging
+        - prod
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  terraform:
+    name: Terraform
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v3
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v2
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+
+      - name: Install TFLint
+        run: |
+          brew install tflint
+
+      - name: Run TFLint
+        run: tflint
+
+      - name: Terraform Init
+        run: terraform init
+
+      - name: Terraform Apply
+        run: terraform apply -auto-approve
+3. Node.js Lambda Function (index.js)
+This Lambda function returns a simple "Hello, World!" message.
+
+backend/index.js
+javascript
+Copy
+exports.handler = async (event) => {
+    const response = {
+        statusCode: 200,
+        body: JSON.stringify("Hello, World!"),
+    };
+    return response;
+};
+4. Terraform Configuration
+Here’s the directory structure of your Terraform code, with three modules: ECR, IAM, and Lambda.
+
+Directory structure:
+css
+Copy
+/terraform
+  ├── main.tf
+  ├── modules
+  │    ├── ecr
+  │    │    ├── main.tf
+  │    │    ├── output.tf
+  │    │    ├── variables.tf
+  │    ├── iam
+  │    │    ├── main.tf
+  │    │    ├── output.tf
+  │    │    ├── variables.tf
+  │    ├── lambda
+  │    │    ├── main.tf
+  │    │    ├── output.tf
+  │    │    ├── variables.tf
+  ├── terraform.tfvars
+5. Terraform Main Configuration (main.tf)
+This is the entry point for your Terraform configuration, calling all modules.
+
+terraform/main.tf
+hcl
+Copy
+module "ecr" {
+  source   = "./modules/ecr"
+  repo_name = "my-app-repo"
+}
+
+module "iam" {
+  source   = "./modules/iam"
+}
+
+module "lambda" {
+  source       = "./modules/lambda"
+  image_name   = "183114607892.dkr.ecr.us-west-2.amazonaws.com/my-app-repo:latest"
+  lambda_role_arn = module.iam.lambda_role_arn
+}
+6. ECR Module (modules/ecr)
+The module for provisioning ECR to store the Docker image.
+
+terraform/modules/ecr/main.tf
+hcl
+Copy
+resource "aws_ecr_repository" "app_repo" {
+  name = var.repo_name
+}
+terraform/modules/ecr/variables.tf
+hcl
+Copy
+variable "repo_name" {
+  description = "Name of the ECR repository"
+  type        = string
+  default     = "my-app-repo"
+}
+terraform/modules/ecr/output.tf
+hcl
+Copy
+output "repository_url" {
+  value = aws_ecr_repository.app_repo.repository_url
+}
+7. IAM Module (modules/iam)
+The module for creating the IAM Role required by Lambda.
+
+terraform/modules/iam/main.tf
+h
+Copy
+resource "aws_iam_role" "lambda_exec_role" {
+  name = "lambda_exec_role_hello_world"
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Action = "sts:AssumeRole"
+        Effect = "Allow"
+        Principal = {
+          Service = "lambda.amazonaws.com"
+        }
+      }
+    ]
+  })
+}
+
+resource "aws_iam_role_policy_attachment" "lambda_exec_policy_attachment" {
+  role       = aws_iam_role.lambda_exec_role.name
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+}
+terraform/modules/iam/variables.tf
+hcl
+Copy
+# No variables needed in this module
+terraform/modules/iam/output.tf
+hcl
+Copy
+output "lambda_role_arn" {
+  value = aws_iam_role.lambda_exec_role.arn
+}
+8. Lambda Module (modules/lambda)
+This module deploys the Lambda function, API Gateway, and configures JWT authentication.
+
+terraform/modules/lambda/main.tf
+hcl
+Copy
+resource "aws_lambda_function" "my_lambda" {
+  function_name = "hello-world-function"
+  role          = var.lambda_role_arn
+  image_uri     = var.image_name
+  package_type  = "Image"
+
+  environment {
+    variables = {
+      NODE_ENV = "production"
+    }
+  }
+}
+
+resource "aws_apigatewayv2_api" "lambda_api" {
+  name          = "lambda-container-api"
+  protocol_type = "HTTP"
+  cors_configuration {
+    allow_origins = ["*"]
+    allow_methods = ["GET", "POST", "PUT", "DELETE"]
+    allow_headers = ["Content-Type", "Authorization"]
+    max_age       = 300
+  }
+}
+
+resource "aws_apigatewayv2_authorizer" "oidc_auth" {
+  api_id          = aws_apigatewayv2_api.lambda_api.id
+  authorizer_type = "JWT"
+  identity_sources = ["$request.header.Authorization"]
+
+  jwt_configuration {
+    issuer   = "https://cognito-idp.us-east-1.amazonaws.com/${aws_cognito_user_pool.oidc.id}"
+    audience = [aws_cognito_user_pool_client.oidc_client.id]
+  }
+
+  name = "oidc-authorizer"
+}
+
+resource "aws_lambda_permission" "api_gw" {
+  statement_id  = "AllowExecutionFromAPIGateway"
+  action        = "lambda:InvokeFunction"
+  function_name = aws_lambda_function.my_lambda.function_name
+  principal     = "apigateway.amazonaws.com"
+
+  source_arn = "${aws_apigatewayv2_api.lambda_api.execution_arn}/*/*"
+}
+
+resource "aws_apigatewayv2_integration" "lambda_integration" {
+  api_id = aws_apigatewayv2_api.lambda_api.id
+  integration_type   = "AWS_PROXY"
+  integration_method = "POST"
+  integration_uri    = aws_lambda_function.my_lambda.invoke_arn
+}
+
+resource "aws_apigatewayv2_route" "lambda_route" {
+  api_id      = aws_apigatewayv2_api.lambda_api.id
+  route_key   = "ANY /{proxy+}"
+  target      = "integrations/${aws_apigatewayv2_integration.lambda_integration.id}"
+  authorizer_id = aws_apigatewayv2_authorizer.oidc_auth.id
+}
+terraform/modules/lambda/variables.tf
+hcl
+Copy
+variable "image_name" {
+  description = "URI of the Docker image in ECR"
+  type        = string
+}
+
+variable "lambda_role_arn" {
+  description = "IAM Role ARN for Lambda"
+  type        = string
+}
+terraform/modules/lambda/output.tf
+hcl
+Copy
+output "lambda_url" {
+  value = aws_apigatewayv2_stage.lambda_stage.invoke_url
+}
+9. Terraform Variables (terraform.tfvars)
+This file contains the values for your variables.
+
+terraform/terraform.tfvars
+hcl
+Copy
+region = "us-east-1"
+10. README.md
+The README file includes architecture, deployment steps, and testing instructions.
+
+README.md
+markdown
+Copy
+# Cloud/DevOps Assignment
+
+## Architecture
+The architecture consists of:
+1. **Amazon ECR** to store the Docker image.
+2. **AWS Lambda** to run the Docker container.
+3. **API Gateway** to expose the Lambda function to the internet.
+4. **Cognito** to handle JWT-based authentication for the API Gateway.
+
+## CI/CD Pipeline
+The CI/CD pipeline consists of:
+1. **GitHub Actions** workflow (`build.yaml`) to build and push the Docker image to ECR.
+2. **GitHub Actions** workflow (`infra.yaml`) to provision the infrastructure using Terraform (IAM, Lambda, API Gateway, etc.).
+
+## Steps to Test
+1. After running the CI/CD pipeline, check the **API Gateway URL**.
+2. Use a valid JWT token to test the **GET /hello-world** endpoint via **API Gateway**.
